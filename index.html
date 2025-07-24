@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediNFC - Bracelet Médical d'Urgence</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { 
+            getAuth, 
+            signInWithEmailAndPassword, 
+            createUserWithEmailAndPassword, 
+            signOut, 
+            onAuthStateChanged,
+            GoogleAuthProvider,
+            signInWithPopup
+        } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            getDocs, 
+            doc, 
+            setDoc, 
+            getDoc, 
+            updateDoc, 
+            deleteDoc, 
+            query, 
+            where 
+        } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+
+        // Configuration Firebase - REMPLACEZ PAR VOS VRAIES CLÉS
+        const firebaseConfig = {
+            apiKey: "your-api-key",
+            authDomain: "your-project.firebaseapp.com",
+            projectId: "your-project-id",
+            storageBucket: "your-project.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "your-app-id"
+        };
+
+        // Initialisation Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const googleProvider = new GoogleAuthProvider();
+
+        // Variables globales
+        let currentUser = null;
+        let isAdmin = false;
+        let currentPage = 'login';
+        let patients = [];
+        let nfcTags = [];
+        let patientData = null;
+        let isEditing = false;
+
+        // Fonctions utilitaires
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(page => {
+                page.classList.add('hidden');
+            });
+            document.getElementById(pageId).classList.remove('hidden');
+            currentPage = pageId;
+        }
+
+        function showError(message, containerId = 'error-container') {
+            const container = document.getElementById(containerId);
+            if (container) {
+                container.innerHTML = `
+                    <div class="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg mb-4">
+                        ${message}
+                    </div>
+                `;
+                setTimeout(() => {
+                    container.innerHTML = '';
+                }, 5000);
+            }
+        }
+
+        function showSuccess(message, containerId = 'success-container') {
+            const container = document.getElementById(containerId);
+            if (container) {
+                container.innerHTML = `
+                    <div class="bg-green-50 border border-green-200 text-green-600 px-4 py-3 rounded-lg mb-4">
+                        ${message}
+                    </div>
+                `;
+                setTimeout(() => {
+                    container.innerHTML = '';
+                }, 3000);
+            }
+        }
+
+        // Fonctions d'authentification
+        async function handleLogin() {
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+            } catch (error) {
+                showError('Email ou mot de passe incorrect');
+            }
+        }
+
+        async function handleGoogleLogin() {
+            try {
+                await signInWithPopup(auth, googleProvider);
+            } catch (error) {
+                showError('Erreur de connexion Google');
+            }
+        }
+
+        async function handleRegister() {
+            const formData = {
+                email: document.getElementById('reg-email').value,
+                password: document.getElementById('reg-password').value,
+                confirmPassword: document.getElementById('reg-confirm-password').value,
+                firstName: document.getElementById('reg-firstName').value,
+                lastName: document.getElementById('reg-lastName').value,
+                birthDate: document.getElementById('reg-birthDate').value,
+                phone: document.getElementById('reg-phone').value,
+                emergencyContact: document.getElementById('reg-emergencyContact').value,
+                emergencyPhone: document.getElementById('reg-emergencyPhone').value,
+                allergies: document.getElementById('reg-allergies').value,
+                medications: document.getElementById('reg-medications').value,
+                conditions: document.getElementById('reg-conditions').value,
+                bloodType: document.getElementById('reg-bloodType').value
+            };
+
+            if (formData.password !== formData.confirmPassword) {
+                showError('Les mots de passe ne correspondent pas', 'register-error');
+                return;
+            }
+
+            try {
+                const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+                
+                await setDoc(doc(db, 'patients', userCredential.user.uid), {
+                    email: formData.email,
+                    firstName: formData.firstName,
+                    lastName: formData.lastName,
+                    birthDate: formData.birthDate,
+                    phone: formData.phone,
+                    emergencyContact: formData.emergencyContact,
+                    emergencyPhone: formData.emergencyPhone,
+                    medicalInfo: {
+                        allergies: formData.allergies,
+                        medications: formData.medications,
+                        conditions: formData.conditions,
+                        bloodType: formData.bloodType
+                    },
+                    createdAt: new Date().toISOString(),
+                    nfcTagId: null
+                });
+
+                showSuccess('Compte créé avec succès !', 'register-success');
+            } catch (error) {
+                showError('Erreur lors de la création du compte: ' + error.message, 'register-error');
+            }
+        }
+
+        async function handleLogout() {
+            try {
+                await signOut(auth);
+            } catch (error) {
+                console.error('Erreur de déconnexion:', error);
+            }
+        }
+
+        // Fonctions pour les données
+        async function fetchPatientData() {
+            if (!currentUser) return;
+            
+            try {
+                const docRef = doc(db, 'patients', currentUser.uid);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    patientData = docSnap.data();
+                    updatePatientDashboard();
+                }
+            } catch (error) {
+                console.error('Erreur lors du chargement des données:', error);
+            }
+        }
+
+        async function fetchPatients() {
+            try {
+                const querySnapshot = await getDocs(collection(db, 'patients'));
+                patients = [];
+                querySnapshot.forEach((doc) => {
+                    patients.push({ id: doc.id, ...doc.data() });
+                });
+                updateAdminDashboard();
+            } catch (error) {
+                console.error('Erreur lors du chargement des patients:', error);
+            }
+        }
+
+        async function fetchNfcTags() {
+            try {
+                const querySnapshot = await getDocs(collection(db, 'nfcTags'));
+                nfcTags = [];
+                querySnapshot.forEach((doc) => {
+                    nfcTags.push({ id: doc.id, ...doc.data() });
+                });
+                updateNfcTagsTable();
+            } catch (error) {
+                console.error('Erreur lors du chargement des tags NFC:', error);
+            }
+        }
+
+        async function savePatientData() {
+            const formData = {
+                firstName: document.getElementById('edit-firstName').value,
+                lastName: document.getElementById('edit-lastName').value,
+                phone: document.getElementById('edit-phone').value,
+                birthDate: document.getElementById('edit-birthDate').value,
+                emergencyContact: document.getElementById('edit-emergencyContact').value,
+                emergencyPhone: document.getElementById('edit-emergencyPhone').value,
+                medicalInfo: {
+                    bloodType: document.getElementById('edit-bloodType').value,
+                    allergies: document.getElementById('edit-allergies').value,
+                    medications: document.getElementById('edit-medications').value,
+                    conditions: document.getElementById('edit-conditions').value
+                }
+            };
+
+            try {
+                await updateDoc(doc(db, 'patients', currentUser.uid), formData);
+                patientData = { ...patientData, ...formData };
+                isEditing = false;
+                updatePatientDashboard();
+                showSuccess('Données sauvegardées avec succès !', 'patient-success');
+            } catch (error) {
+                showError('Erreur lors de la sauvegarde', 'patient-error');
+            }
+        }
+
+        async function assignNfcTag(patientId, tagId) {
+            try {
+                const tagData = {
+                    tagId: tagId,
+                    patientId: patientId,
+                    pdfUrl: `https://medicalapp.com/patient/${patientId}/emergency.pdf`,
+                    createdAt: new Date().toISOString(),
+                    isActive: true
+                };
+
+                await setDoc(doc(db, 'nfcTags', tagId), tagData);
+                await updateDoc(doc(db, 'patients', patientId), { nfcTagId: tagId });
+
+                await fetchPatients();
+                await fetchNfcTags();
+                showSuccess('Tag NFC assigné avec succès !', 'admin-success');
+            } catch (error) {
+                showError('Erreur lors de l\'assignation du tag', 'admin-error');
+            }
+        }
+
+        async function deleteNfcTag(tagId, patientId) {
+            try {
+                await deleteDoc(doc(db, 'nfcTags', tagId));
+                
+                if (patientId) {
+                    await updateDoc(doc(db, 'patients', patientId), { nfcTagId: null });
+                }
+
+                await fetchPatients();
+                await fetchNfcTags();
+                showSuccess('Tag NFC supprimé avec succès !', 'admin-success');
+            } catch (error) {
+                showError('Erreur lors de la suppression du tag', 'admin-error');
+            }
+        }
+
+        // Fonctions de mise à jour de l'interface
+        function updateHeader() {
+            if (currentUser) {
+                document.getElementById('header').classList.remove('hidden');
+                document.getElementById('user-email').textContent = currentUser.email;
+                document.getElementById('user-role').textContent = isAdmin ? 'Administrateur' : 'Patient';
+            } else {
+                document.getElementById('header').classList.add('hidden');
+            }
+        }
+
+        function updatePatientDashboard() {
+            if (!patientData) return;
+
+            const elements = {
+                'display-firstName': patientData.firstName,
+                'display-lastName': patientData.lastName,
+                'display-email': patientData.email,
+                'display-phone': patientData.phone,
+                'display-birthDate': patientData.birthDate,
+                'display-emergencyContact': patientData.emergencyContact,
+                'display-emergencyPhone': patientData.emergencyPhone,
+                'display-bloodType': patientData.medicalInfo?.bloodType || 'Non renseigné',
+                'display-allergies': patientData.medicalInfo?.allergies || 'Aucune allergie connue',
+                'display-medications': patientData.medicalInfo?.medications || 'Aucun médicament',
+                'display-conditions': patientData.medicalInfo?.conditions || 'Aucune condition particulière'
+            };
+
+            Object.keys(elements).forEach(id => {
+                const element = document.getElementById(id);
+                if (element) element.textContent = elements[id];
+            });
+
+            // Mettre à jour les champs d'édition
+            if (isEditing) {
+                document.getElementById('edit-firstName').value = patientData.firstName || '';
+                document.getElementById('edit-lastName').value = patientData.lastName || '';
+                document.getElementById('edit-phone').value = patientData.phone || '';
+                document.getElementById('edit-birthDate').value = patientData.birthDate || '';
+                document.getElementById('edit-emergencyContact').value = patientData.emergencyContact || '';
+                document.getElementById('edit-emergencyPhone').value = patientData.emergencyPhone || '';
+                document.getElementById('edit-bloodType').value = patientData.medicalInfo?.bloodType || '';
+                document.getElementById('edit-allergies').value = patientData.medicalInfo?.allergies || '';
+                document.getElementById('edit-medications').value = patientData.medicalInfo?.medications || '';
+                document.getElementById('edit-conditions').value = patientData.medicalInfo?.conditions || '';
+            }
+
+            // Statut du bracelet NFC
+            const nfcStatus = document.getElementById('nfc-status');
+            if (patientData.nfcTagId) {
+                nfcStatus.innerHTML = `
+                    <div class="flex items-center space-x-2">
+                        <div class="w-3 h-3 bg-green-500 rounded-full"></div>
+                        <span class="text-green-700">Bracelet activé - ID: ${patientData.nfcTagId}</span>
+                    </div>
+                `;
+            } else {
+                nfcStatus.innerHTML = `
+                    <div class="flex items-center space-x-2">
+                        <div class="w-3 h-3 bg-orange-500 rounded-full"></div>
+                        <span class="text-orange-700">En attente d'activation par l'administrateur</span>
+                    </div>
+                `;
+            }
+
+            // Afficher/masquer les sections d'édition
+            document.getElementById('view-mode').classList.toggle('hidden', isEditing);
+            document.getElementById('edit-mode').classList.toggle('hidden', !isEditing);
+        }
+
+        function updateAdminDashboard() {
+            const tbody = document.getElementById('patients-table-body');
+            tbody.innerHTML = '';
+
+            patients.forEach(patient => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50';
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div>
+                            <div class="text-sm font-medium text-gray-900">${patient.firstName} ${patient.lastName}</div>
+                            <div class="text-sm text-gray-500">${patient.email}</div>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm text-gray-900">${patient.phone}</div>
+                        <div class="text-sm text-gray-500">Urgence: ${patient.emergencyContact} (${patient.emergencyPhone})</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        ${patient.nfcTagId ? 
+                            `<div class="flex items-center">
+                                <div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+                                <span class="text-sm text-green-700">${patient.nfcTagId}</span>
+                            </div>` :
+                            `<div class="flex items-center space-x-2">
+                                <input type="text" id="tag-input-${patient.id}" placeholder="ID du tag NFC" 
+                                       class="px-2 py-1 text-sm border border-gray-300 rounded">
+                                <button onclick="assignTagFromInput('${patient.id}')" 
+                                        class="text-indigo-600 hover:text-indigo-900 text-sm">
+                                    <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
+                                    </svg>
+                                </button>
+                            </div>`
+                        }
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        ${patient.nfcTagId ? 
+                            `<button onclick="deleteTag('${patient.nfcTagId}', '${patient.id}')" 
+                                     class="text-red-600 hover:text-red-900">
+                                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                </svg>
+                            </button>` : ''
+                        }
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            // Mettre à jour les compteurs
+            document.getElementById('patients-count').textContent = patients.length;
+            document.getElementById('nfc-count').textContent = nfcTags.length;
+        }
+
+        function updateNfcTagsTable() {
+            const tbody = document.getElementById('nfc-tags-table-body');
+            tbody.innerHTML = '';
+
+            nfcTags.forEach(tag => {
+                const patient = patients.find(p => p.id === tag.patientId);
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50';
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${tag.tagId}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        ${patient ? `${patient.firstName} ${patient.lastName}` : 'Patient introuvable'}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <a href="${tag.pdfUrl}" target="_blank" class="text-indigo-600 hover:text-indigo-900">${tag.pdfUrl}</a>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <button onclick="simulateNfcRead('${tag.tagId}')" class="text-blue-600 hover:text-blue-900 mr-4">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
+                        <button onclick="deleteTag('${tag.tagId}', '${tag.patientId}')" class="text-red-600 hover:text-red-900">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                            </svg>
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        // Fonctions globales pour les événements
+        window.handleLogin = handleLogin;
+        window.handleGoogleLogin = handleGoogleLogin;
+        window.handleRegister = handleRegister;
+        window.handleLogout = handleLogout;
+        window.showPage = showPage;
+        window.savePatientData = savePatientData;
+
+        window.toggleEdit = function() {
+            isEditing = !isEditing;
+            updatePatientDashboard();
+        };
+
+        window.showAdminTab = function(tab) {
+            document.querySelectorAll('.admin-tab').forEach(t => t.classList.add('hidden'));
+            document.getElementById(`admin-${tab}`).classList.remove('hidden');
+            
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('border-indigo-500', 'text-indigo-600');
+                btn.classList.add('border-transparent', 'text-gray-500');
+            });
+            
+            const activeBtn = document.querySelector(`.tab-button[onclick="showAdminTab('${tab}')"]`);
+            if (activeBtn) {
+                activeBtn.classList.remove('border-transparent', 'text-gray-500');
+                activeBtn.classList.add('border-indigo-500', 'text-indigo-600');
+            }
+        };
+
+        window.assignTagFromInput = function(patientId) {
+            const input = document.getElementById(`tag-input-${patientId}`);
+            const tagId = input.value.trim();
+            if (tagId) {
+                assignNfcTag(patientId, tagId);
+                input.value = '';
+            }
+        };
+
+        window.deleteTag = function(tagId, patientId) {
+            if (confirm('Êtes-vous sûr de vouloir supprimer ce tag NFC ?')) {
+                deleteNfcTag(tagId, patientId);
+            }
+        };
+
+        window.simulateNfcRead = function(tagId) {
+            const tag = nfcTags.find(t => t.tagId === tagId);
+            if (tag) {
+                window.open(tag.pdfUrl, '_blank');
+            }
+        };
+
+        window.simulateNfcAction = function(action) {
+            alert(`Simulation: ${action} NFC activée`);
+        };
+
+        // Gestion de l'état d'authentification
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUser = user;
+                isAdmin = user.email === 'jadetaraf@hotmail.fr';
+                
+                updateHeader();
+                
+                if (isAdmin) {
+                    showPage('admin-page');
+                    await fetchPatients();
+                    await fetchNfcTags();
+                } else {
+                    showPage('patient-page');
+                    await fetchPatientData();
+                }
+            } else {
+                currentUser = null;
+                isAdmin = false;
+                showPage('login-page');
+                updateHeader();
+            }
+        });
+
+        // Chargement initial
+        document.addEventListener('DOMContentLoaded', function() {
+            showPage('login-page');
+        });
+    </script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <!-- Header -->
+    <header id="header" class="bg-white shadow-sm border-b border-gray-200 hidden">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center py-4">
+                <div class="flex items-center space-x-3">
+                    <svg class="h-8 w-8 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                    </svg>
+                    <h1 class="text-2xl font-bold text-gray-900">MediNFC</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span class="text-sm text-gray-600">
+                        <span id="user-role"></span>: <span id="user-email"></span>
+                    </span>
+                    <button onclick="handleLogout()" class="flex items-center space-x-1 text-gray-600 hover:text-gray-900">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                        </svg>
+                        <span>Déconnexion</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Page de connexion -->
+    <div id="login-page" class="page min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-md w-full space-y-8">
+            <div class="text-center">
+                <svg class="mx-auto h-12 w-12 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+                <h2 class="mt-6 text-3xl font-extrabold text-gray-900">Connexion MediNFC</h2>
+                <p class="mt-2 text-sm text-gray-600">Système de bracelet médical d'urgence</p>
+            </div>
+            
+            <div id="error-container"></div>
+            
+            <div class="mt-8 space-y-6">
+                <div class="rounded-md shadow-sm space-y-4">
+                    <div>
+                        <label for="login-email" class="block text-sm font-medium text-gray-700">Email</label>
+                        <input id="login-email" name="email" type="email" required
+                               class="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                               placeholder="votre@email.com">
+                    </div>
+                    
+                    <div>
+                        <label for="login-password" class="block text-sm font-medium text-gray-700">Mot de passe</label>
+                        <input id="login-password" name="password" type="password" required
+                               class="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                               placeholder="Mot de passe">
+                    </div>
+                </div>
+
+                <div class="space-y-3">
+                    <button onclick="handleLogin()"
+                            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Se connecter
+                    </button>
+
+                    <button onclick="handleGoogleLogin()"
+                            class="w-full flex justify-center py-2 px-4 border border-gray-300 text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Connexion avec Google
+                    </button>
+
+                    <button onclick="showPage('register-page')"
+                            class="w-full text-center text-sm text-indigo-600 hover:text-indigo-500">
+                        Créer un compte patient
+                    </button>
+                </div>
+            </div>
+
+            <div class="mt-6 p-4 bg-gray-50 rounded-lg">
+                <p class="text-xs text-gray-600">
+                    <strong>Compte admin test:</strong><br>
+                    Email: jadetaraf@hotmail.fr<br>
+                    Mot de passe: ADMIN
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Page d'inscription -->
+    <div id="register-page" class="page hidden min-h-screen py-12 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-2xl mx-auto">
+            <div class="text-center mb-8">
+                <svg class="mx-auto h-12 w-12 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+                <h2 class="mt-6 text-3xl font-extrabold text-gray-900">Créer un compte patient</h2>
+            </div>
+
+            <div id="register-error"></div>
+            <div id="register-success"></div>
+
+            <div class="bg-white shadow-lg rounded-lg p-6 space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Prénom</label>
+                        <input type="text" id="reg-firstName" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Nom</label>
+                        <input type="text" id="reg-lastName" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Email</label>
+                        <input type="email" id="reg-email" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Téléphone</label>
+                        <input type="tel" id="reg-phone" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Date de naissance</label>
+                        <input type="date" id="reg-birthDate" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Groupe sanguin</label>
+                        <select id="reg-bloodType"
+                                class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            <option value="">Sélectionner</option>
+                            <option value="A+">A+</option>
+                            <option value="A-">A-</option>
+                            <option value="B+">B+</option>
+                            <option value="B-">B-</option>
+                            <option value="AB+">AB+</option>
+                            <option value="AB-">AB-</option>
+                            <option value="O+">O+</option>
+                            <option value="O-">O-</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Contact d'urgence</label>
+                        <input type="text" id="reg-emergencyContact" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Téléphone d'urgence</label>
+                        <input type="tel" id="reg-emergencyPhone" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Mot de passe</label>
+                        <input type="password" id="reg-password" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Confirmer le mot de passe</label>
+                        <input type="password" id="reg-confirm-password" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Allergies</label>
+                        <textarea id="reg-allergies" rows="3"
+                                  class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                  placeholder="Listez vos allergies connues..."></textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Médicaments actuels</label>
+                        <textarea id="reg-medications" rows="3"
+                                  class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                  placeholder="Listez vos médicaments avec posologies..."></textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Conditions médicales</label>
+                        <textarea id="reg-conditions" rows="3"
+                                  class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                                  placeholder="Conditions médicales importantes..."></textarea>
+                    </div>
+                </div>
+
+                <div class="flex space-x-4">
+                    <button onclick="handleRegister()"
+                            class="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        Créer le compte
+                    </button>
+                    <button onclick="showPage('login-page')"
+                            class="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500">
+                        Retour
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Patient -->
+    <div id="patient-page" class="page hidden">
+        <div class="max-w-6xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+            <div class="mb-8">
+                <h1 class="text-3xl font-bold text-gray-900">Mon Profil Médical</h1>
+                <p class="mt-2 text-gray-600">Gérez vos informations personnelles et médicales</p>
+            </div>
+
+            <div id="patient-success"></div>
+            <div id="patient-error"></div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <!-- Informations personnelles -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-xl font-semibold text-gray-900 flex items-center">
+                            <svg class="h-5 w-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                            </svg>
+                            Informations personnelles
+                        </h2>
+                        <button onclick="toggleEdit()" class="flex items-center space-x-1 text-indigo-600 hover:text-indigo-800">
+                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                            </svg>
+                            <span>Modifier</span>
+                        </button>
+                    </div>
+
+                    <!-- Mode affichage -->
+                    <div id="view-mode" class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Prénom</label>
+                                <p id="display-firstName" class="mt-1 text-gray-900"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Nom</label>
+                                <p id="display-lastName" class="mt-1 text-gray-900"></p>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Email</label>
+                            <p id="display-email" class="mt-1 text-gray-900"></p>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Téléphone</label>
+                                <p id="display-phone" class="mt-1 text-gray-900"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Date de naissance</label>
+                                <p id="display-birthDate" class="mt-1 text-gray-900"></p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Contact d'urgence</label>
+                                <p id="display-emergencyContact" class="mt-1 text-gray-900"></p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Téléphone d'urgence</label>
+                                <p id="display-emergencyPhone" class="mt-1 text-gray-900"></p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mode édition -->
+                    <div id="edit-mode" class="space-y-4 hidden">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Prénom</label>
+                                <input type="text" id="edit-firstName"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Nom</label>
+                                <input type="text" id="edit-lastName"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Téléphone</label>
+                                <input type="tel" id="edit-phone"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Date de naissance</label>
+                                <input type="date" id="edit-birthDate"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Contact d'urgence</label>
+                                <input type="text" id="edit-emergencyContact"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Téléphone d'urgence</label>
+                                <input type="tel" id="edit-emergencyPhone"
+                                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            </div>
+                        </div>
+
+                        <div class="mt-6">
+                            <button onclick="savePatientData()"
+                                    class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">
+                                Sauvegarder
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Informations médicales -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-6 flex items-center">
+                        <svg class="h-5 w-5 mr-2 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                        </svg>
+                        Informations médicales
+                    </h2>
+
+                    <!-- Mode affichage médical -->
+                    <div id="medical-view-mode" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Groupe sanguin</label>
+                            <p id="display-bloodType" class="mt-1 text-gray-900"></p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Allergies</label>
+                            <p id="display-allergies" class="mt-1 text-gray-900"></p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Médicaments</label>
+                            <p id="display-medications" class="mt-1 text-gray-900"></p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Conditions médicales</label>
+                            <p id="display-conditions" class="mt-1 text-gray-900"></p>
+                        </div>
+                    </div>
+
+                    <!-- Mode édition médical (intégré dans edit-mode) -->
+                    <div id="medical-edit-mode" class="space-y-4 hidden">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Groupe sanguin</label>
+                            <select id="edit-bloodType"
+                                    class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                                <option value="">Sélectionner</option>
+                                <option value="A+">A+</option>
+                                <option value="A-">A-</option>
+                                <option value="B+">B+</option>
+                                <option value="B-">B-</option>
+                                <option value="AB+">AB+</option>
+                                <option value="AB-">AB-</option>
+                                <option value="O+">O+</option>
+                                <option value="O-">O-</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Allergies</label>
+                            <textarea id="edit-allergies" rows="3"
+                                      class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Médicaments</label>
+                            <textarea id="edit-medications" rows="3"
+                                      class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">Conditions médicales</label>
+                            <textarea id="edit-conditions" rows="3"
+                                      class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statut du bracelet NFC -->
+            <div class="mt-8 bg-white rounded-lg shadow-md p-6">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4 flex items-center">
+                    <svg class="h-5 w-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                    </svg>
+                    Bracelet NFC
+                </h2>
+                
+                <div id="nfc-status" class="flex items-center space-x-4">
+                    <!-- Le statut sera mis à jour par JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Admin -->
+    <div id="admin-page" class="page hidden">
+        <div class="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+            <div class="mb-8">
+                <h1 class="text-3xl font-bold text-gray-900">Dashboard Administrateur</h1>
+                <p class="mt-2 text-gray-600">Gestion des patients et des bracelets NFC</p>
+            </div>
+
+            <div id="admin-success"></div>
+            <div id="admin-error"></div>
+
+            <!-- Navigation -->
+            <div class="border-b border-gray-200 mb-8">
+                <nav class="-mb-px flex space-x-8">
+                    <button onclick="showAdminTab('patients')"
+                            class="tab-button py-2 px-1 border-b-2 font-medium text-sm border-indigo-500 text-indigo-600">
+                        <svg class="h-4 w-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"/>
+                        </svg>
+                        Patients (<span id="patients-count">0</span>)
+                    </button>
+                    <button onclick="showAdminTab('nfc')"
+                            class="tab-button py-2 px-1 border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">
+                        <svg class="h-4 w-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                        </svg>
+                        Tags NFC (<span id="nfc-count">0</span>)
+                    </button>
+                </nav>
+            </div>
+
+            <!-- Liste des patients -->
+            <div id="admin-patients" class="admin-tab bg-white shadow-md rounded-lg overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h2 class="text-lg font-medium text-gray-900">Liste des patients</h2>
+                </div>
+                
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Patient</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bracelet NFC</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="patients-table-body" class="bg-white divide-y divide-gray-200">
+                            <!-- Les données seront ajoutées par JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Gestion des tags NFC -->
+            <div id="admin-nfc" class="admin-tab hidden space-y-6">
+                <div class="bg-white shadow-md rounded-lg p-6">
+                    <h2 class="text-lg font-medium text-gray-900 mb-4">Outils NFC</h2>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <button onclick="simulateNfcAction('Lecture')"
+                                class="flex items-center justify-center space-x-2 bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700">
+                            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                            </svg>
+                            <span>Lire Tag NFC</span>
+                        </button>
+                        
+                        <button onclick="simulateNfcAction('Écriture')"
+                                class="flex items-center justify-center space-x-2 bg-green-600 text-white py-3 px-4 rounded-lg hover:bg-green-700">
+                            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                            </svg>
+                            <span>Écrire Tag NFC</span>
+                        </button>
+                        
+                        <button onclick="simulateNfcAction('Effacement')"
+                                class="flex items-center justify-center space-x-2 bg-red-600 text-white py-3 px-4 rounded-lg hover:bg-red-700">
+                            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                            </svg>
+                            <span>Effacer Tag NFC</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white shadow-md rounded-lg overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-200">
+                        <h2 class="text-lg font-medium text-gray-900">Tags NFC actifs</h2>
+                    </div>
+                    
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tag ID</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Patient</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">URL PDF</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="nfc-tags-table-body" class="bg-white divide-y divide-gray-200">
+                                <!-- Les données seront ajoutées par JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Script supplémentaire pour gérer l'édition médicale
+        function toggleEdit() {
+            isEditing = !isEditing;
+            
+            // Basculer entre les modes d'affichage et d'édition pour les infos médicales aussi
+            document.getElementById('medical-view-mode').classList.toggle('hidden', isEditing);
+            document.getElementById('medical-edit-mode').classList.toggle('hidden', !isEditing);
+            
+            updatePatientDashboard();
+        }
+    </script>
+</body>
+</html>
